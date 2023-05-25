@@ -6,7 +6,7 @@ Install:
 poetry install
 ```
 
-Run:
+From inside `backend` run:
 ```
 poetry run python main.py
 ```
