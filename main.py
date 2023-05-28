@@ -1,86 +1,237 @@
 """Natural Language Interface"""
+
 import json
+import uuid
 import sys
 
 import openai
 
 
-def completion(messages):
-    """completion"""
-    chat_completion = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo", messages=messages
+def completion(name, messages, verification, max_attempts):
+    count = 0
+    while True:
+        count += 1
+        print(f"Attempting completion for {name} (attempt {count})")
+        chat_completion = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo", messages=messages
+        )
+        result = chat_completion.choices[0].message.content
+        if verification(result):
+            return result
+        if count >= max_attempts:
+            raise Exception(f"Max attempts ({max_attempts}) reached for {name}")
+
+
+def create_title(prompt):
+    messages = [
+        {
+            "role": "system",
+            "content": "Create a short title for the following question/task",
+        },
+        {"role": "user", "content": "Give me a report of last week's earnings"},
+        {"role": "user", "content": "Earning's Report"},
+        {"role": "user", "content": prompt},
+    ]
+    return completion("create_title", messages, lambda x: None, 1)
+
+
+def get_output_type(prompt):
+    output_types = ["text", "graph", "spreadsheet", "form", "cron", "empty"]
+    messages = [
+        {
+            "role": "system",
+            "content": f"A user will input a task/question. You must classify this request by providing the type of output that would best fit. Options: {output_types}",
+        },
+        {"role": "user", "content": "Give me a report of last week's earnings"},
+        {"role": "user", "content": "spreadsheet"},
+        {"role": "user", "content": prompt},
+    ]
+    return completion("get_output_type", messages, lambda x: x in output_types, 3)
+
+
+def verify_step(step, previous_output_type):
+    if step.input_type != previous_output_type:
+        return False
+    messages = [
+        {
+            "role": "system",
+            "content": "",
+        },
+        {"role": "user", "content": "Give me a report of last week's earnings"},
+        {"role": "user", "content": "True"},
+        {
+            "role": "user",
+            "content": "",
+        },
+    ]
+
+    result = completion(
+        "verify_step",
+        messages,
+        lambda x: x in ["True", "False"],
+        1,
+    )
+    return True if result == "True" else False
+
+
+def verify_plan(prompt, steps, output_type):
+    has_correct_shape = isinstance(steps, list) and all(
+        verify_step_shape(step) for step in steps
+    )
+    if not has_correct_shape:
+        return False
+
+    previous_output_type = ""
+    for step in steps:
+        previous_output_type = step.output_type
+        if not verify_step(step, previous_output_type):
+            return False
+
+    messages = [
+        {
+            "role": "system",
+            "content": "",
+        },
+        {"role": "user", "content": "Give me a report of last week's earnings"},
+        {"role": "user", "content": "True"},
+        {
+            "role": "user",
+            "content": f"prompt: {prompt}, steps: {steps}, output_type: {output_type}",
+        },
+    ]
+
+    result = completion(
+        "verify_plan",
+        messages,
+        lambda x: x in ["True", "False"],
+        3,
+    )
+    return True if result == "True" else False
+
+
+def verify_step_shape(step):
+    step_types = []
+    return all(
+        hasattr(step, "text"),
+        isinstance(step.text, str),
+        hasattr(step, "input"),
+        step.input in step_types,
+        hasattr(step, "output"),
+        step.output in step_types,
     )
 
-    return chat_completion.choices[0].message.content
 
+def create_plan(prompt):
+    output_type = get_output_type(prompt)
+    print(f"output_type {output_type}")
 
-def get_output_type(arg):
     messages = [
         {
             "role": "system",
-            "content": "A user will input a task/question. You must classify this request by providing the type of output that would best fit. Options: 'text', 'graph', 'spreadsheet', 'form', 'cron', 'empty'",
+            "content": "",
         },
         {"role": "user", "content": "Give me a report of last week's earnings"},
         {"role": "user", "content": "spreadsheet"},
-        {"role": "user", "content": arg},
+        {"role": "user", "content": prompt},
     ]
-    return completion(messages)
+
+    steps = json.loads(
+        completion(
+            "create_plan",
+            messages,
+            lambda x: verify_plan(prompt, steps, output_type),
+            3,
+        )
+    )
+
+    return {"steps": steps, "output_type": output_type}
 
 
-def create_plan(arg, output_type):
-    # TODO: JSON PLAN
+def verify_step_result(step, result):
     messages = [
         {
             "role": "system",
-            "content": "A user will input a task/question. You must classify this request by providing the type of output that would best fit. Options: 'text', 'graph', 'spreadsheet', 'form', 'cron', 'empty'",
+            "content": "",
         },
         {"role": "user", "content": "Give me a report of last week's earnings"},
         {"role": "user", "content": "spreadsheet"},
-        {"role": "user", "content": arg},
+        {"role": "user", "content": f"step: {step}, result: {result}"},
     ]
-    return json.loads(completion(messages))
+
+    return completion(
+        "verify_step_result",
+        messages,
+        lambda x: None,
+        1,
+    )
 
 
-def get_required_data_sources(plan):
+def execute_step_code(code, input, memory):
+    # TODO Run code
     return True
 
 
-def get_existing_data_sources():
-    return True
+def execute_step(step, input, memory):
+    messages = [
+        {
+            "role": "system",
+            "content": "",
+        },
+        {"role": "user", "content": "Give me a report of last week's earnings"},
+        {"role": "user", "content": "spreadsheet"},
+        {"role": "user", "content": f"memory: ${memory}, text: {step.text}"},
+    ]
 
+    # Note do stuff depending on step type (if code, verify code generated, if not, verify output type, etc.)
+    result = completion(
+        "execute_step",
+        messages,
+        lambda x: verify_step_result(step, x),
+        3,
+    )
 
-def prompt_user_for_data_sources():
-    return True
+    if step.type == "code":
+        result = execute_step_code(result, input, memory)
 
+    # Check output type is correct
 
-def verify_plan(plan):
-    return True
+    return result
 
 
 def execute_plan(plan):
-    return True
+    outputs = []
+    memory = []
+    for step in plan.steps:
+        result = execute_step(step, outputs[-1], memory)
+        outputs.append(memory.output)
+        memory.append(result.memory)
+
+    return outputs[-1]
 
 
-def save_result(result):
-    return True
+def save_result(title, prompt, plan, result):
+    filename = f"${uuid.uuid4()}.json"
+    f = open(filename, "w")
+    f.write(
+        json.dumps({"title": title, "prompt": prompt, "plan": plan, "result": result})
+    )
+    f.close()
 
 
-def prompt(arg):
-    """prompt"""
+def handle(prompt):
+    title = create_title(prompt)
+    print(f"title {title}")
 
-    output_type = get_output_type(arg)
-    print(f"output_type {output_type}")
+    plan = create_plan(prompt)
+    print(f"plan {plan}")
 
-    # plan = create_plan(arg, output_type)
-    # required_data_sources = get_required_data_sources(plan)
-    # existing_data_sources = get_existing_data_sources()
-    # needed_data_sources = required_data_sources.difference(existing_data_sources)
-    # prompt_user_for_data_sources(needed_data_sources)
-    # existing_data_sources = get_existing_data_sources()
-    # verify_plan(plan)
-    # result = execute_plan(plan)
-    # save_result(result)
-    # return result
+    # figure out data sources
+
+    result = execute_plan(plan)
+    print(f"result {result}")
+
+    filename = save_result(title, prompt, plan, result)
+    print(f"filename {filename}")
 
 
 # 2. Classification: What is the output type?
@@ -106,10 +257,9 @@ def prompt(arg):
 
 
 def main():
-    """main"""
     if len(sys.argv) != 2:
         sys.exit("Takes exactly one argument.")
-    prompt(sys.argv[1])
+    handle(sys.argv[1])
 
 
 if __name__ == "__main__":
